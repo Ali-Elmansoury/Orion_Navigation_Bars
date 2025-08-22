@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -16,9 +17,10 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.ArrayAdapter
-import androidx.annotation.RequiresPermission
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -34,7 +36,7 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "Bluetooth"
     }
 
-    val adapter = BluetoothAdapter.getDefaultAdapter()
+    val adapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
 
     // Interface to abstract BluetoothDevice and mock devices
     interface BluetoothDeviceWrapper {
@@ -44,43 +46,44 @@ class MainActivity : AppCompatActivity() {
         fun createBond(): Boolean
     }
 
-    // Wrapper for real BluetoothDevice
-    private class RealBluetoothDevice(private val device: BluetoothDevice) : BluetoothDeviceWrapper {
+    // Wrapper for real BluetoothDevice (NO reflection; takes Context directly)
+    private class RealBluetoothDevice(
+        private val context: Context,
+        private val device: BluetoothDevice
+    ) : BluetoothDeviceWrapper {
         override val name: String
-            get() = if (ActivityCompat.checkSelfPermission(
-                    device.context,
-                    Manifest.permission.BLUETOOTH_CONNECT
-                ) == PackageManager.PERMISSION_GRANTED
+            get() = if (
+                ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
             ) {
                 device.name ?: device.address
             } else {
                 device.address
             }
+
         override val address: String
             get() = device.address
+
         override val bondState: Int
-            @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-            get() = device.bondState
-        override fun createBond(): Boolean {
-            return if (ActivityCompat.checkSelfPermission(
-                    device.context,
-                    Manifest.permission.BLUETOOTH_CONNECT
-                ) == PackageManager.PERMISSION_GRANTED
+            get() = if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
             ) {
-                device.createBond()
+                // Safe fallback when permission isn't granted yet
+                BluetoothDevice.BOND_NONE
             } else {
+                device.bondState
+            }
+
+        override fun createBond(): Boolean {
+            return if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+            ) {
                 false
+            } else {
+                device.createBond()
             }
         }
-
-        // Helper to get context from activity; assumes MainActivity is the context
-        private val BluetoothDevice.context: Context
-            get() = this.let {
-                MainActivity::class.java.getDeclaredField("this$0").let { field ->
-                    field.isAccessible = true
-                    field.get(this) as Context
-                }
-            }
     }
 
     // Mock device for emulator
@@ -89,9 +92,7 @@ class MainActivity : AppCompatActivity() {
         override val address: String
     ) : BluetoothDeviceWrapper {
         override val bondState: Int = BluetoothDevice.BOND_NONE
-        override fun createBond(): Boolean {
-            return true // Simulate successful pairing
-        }
+        override fun createBond(): Boolean = true // Simulate successful pairing
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -152,15 +153,15 @@ class MainActivity : AppCompatActivity() {
                     or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
-        window.statusBarColor = android.graphics.Color.TRANSPARENT
-        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.setDecorFitsSystemWindows(false)
             window.insetsController?.let { controller ->
-                controller.hide(android.view.WindowInsets.Type.systemBars())
+                controller.hide(WindowInsets.Type.systemBars())
                 controller.systemBarsBehavior =
-                    android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
         }
     }
@@ -180,13 +181,11 @@ class MainActivity : AppCompatActivity() {
                     BluetoothDevice.ACTION_FOUND -> {
                         val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
                         if (device != null && !discoveredDevices.any { it.address == device.address }) {
-                            val wrapper = RealBluetoothDevice(device)
+                            val wrapper = RealBluetoothDevice(this@MainActivity, device)
                             discoveredDevices.add(wrapper)
                             deviceNames.add(wrapper.name)
                             Log.d(TAG, "Device found: ${wrapper.name}")
-                            runOnUiThread {
-                                scanningAdapter?.notifyDataSetChanged()
-                            }
+                            runOnUiThread { scanningAdapter?.notifyDataSetChanged() }
                         }
                     }
                     BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
@@ -381,7 +380,7 @@ class MainActivity : AppCompatActivity() {
         if (pairedDevices.isNullOrEmpty()) {
             startBluetoothDiscovery()
         } else {
-            val wrappers = pairedDevices.map { RealBluetoothDevice(it) }
+            val wrappers = pairedDevices.map { RealBluetoothDevice(this, it) }
             val names = wrappers.map { it.name }.toTypedArray()
             showDeviceDialog(names, wrappers)
         }
