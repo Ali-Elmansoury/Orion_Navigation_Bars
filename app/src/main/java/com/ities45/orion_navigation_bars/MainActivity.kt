@@ -34,6 +34,8 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "Bluetooth"
     }
 
+    val adapter = BluetoothAdapter.getDefaultAdapter()
+
     // Interface to abstract BluetoothDevice and mock devices
     interface BluetoothDeviceWrapper {
         val name: String
@@ -73,12 +75,12 @@ class MainActivity : AppCompatActivity() {
 
         // Helper to get context from activity; assumes MainActivity is the context
         private val BluetoothDevice.context: Context
-            get() = (this as? android.bluetooth.BluetoothDevice)?.let {
+            get() = this.let {
                 MainActivity::class.java.getDeclaredField("this$0").let { field ->
                     field.isAccessible = true
                     field.get(this) as Context
                 }
-            } ?: throw IllegalStateException("Context not available")
+            }
     }
 
     // Mock device for emulator
@@ -111,6 +113,8 @@ class MainActivity : AppCompatActivity() {
             setBluetoothIcon(R.drawable.bluetooth)
             setDrowsinessIcon(R.drawable.eye)
             setSettingsIcon(R.drawable.setting)
+
+            Log.d(TAG, "Bluetooth adapter: $adapter, enabled: ${adapter?.isEnabled}")
 
             setWifiIconClickListener {
                 startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
