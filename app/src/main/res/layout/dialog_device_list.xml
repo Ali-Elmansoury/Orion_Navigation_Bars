@@ -14,8 +14,8 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         android:layout_marginTop="16dp"
-        app:indicatorColor="?attr/colorPrimary"
-        app:trackColor="?attr/colorPrimaryContainer" />
+        app:indicatorColor="@color/design_default_color_error"
+        app:trackColor="@color/black" />
 
     <TextView
         android:id="@+id/empty_message"
