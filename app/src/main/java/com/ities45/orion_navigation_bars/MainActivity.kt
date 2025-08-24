@@ -48,7 +48,7 @@ class MainActivity : AppCompatActivity() {
 
             setDrowsinessIconClickListener {
                 isDrowsinessIconEye = !isDrowsinessIconEye // Toggle state
-                val newIcon = if (isDrowsinessIconEye) R.drawable.eye else R.drawable.drowsiness
+                val newIcon = if (isDrowsinessIconEye) R.drawable.eye else R.drawable.hidden
                 setDrowsinessIcon(newIcon)
             }
 

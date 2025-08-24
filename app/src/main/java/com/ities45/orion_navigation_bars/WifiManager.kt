@@ -10,7 +10,11 @@ import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
+import android.net.wifi.WifiInfo
+import android.net.NetworkInfo
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import androidx.annotation.RequiresApi
@@ -22,7 +26,6 @@ import androidx.core.view.isVisible
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.google.android.material.progressindicator.CircularProgressIndicator
 import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.textfield.TextInputEditText
 import android.view.LayoutInflater
@@ -31,19 +34,23 @@ import android.view.ViewGroup
 import android.view.animation.OvershootInterpolator
 import android.widget.TextView
 import android.net.wifi.ScanResult
+import android.widget.ProgressBar
 
 class WifiManager(private val activity: AppCompatActivity) {
 
     companion object {
         private const val REQUEST_WIFI_PERMISSION = 2
         private const val TAG = "WifiManager"
+        private const val CONNECTION_TIMEOUT_MS = 10_000L // 10 seconds
     }
 
     private val wifiManager: WifiManager by lazy { activity.getSystemService(Context.WIFI_SERVICE) as WifiManager }
     private val wifiNetworks = mutableListOf<WifiNetworkWrapper>()
     private var wifiReceiver: BroadcastReceiver? = null
     private var wifiDialog: androidx.appcompat.app.AlertDialog? = null
+    private var connectionDialog: androidx.appcompat.app.AlertDialog? = null
     private var pendingStartWifiScan: Boolean = false
+    private val handler = Handler(Looper.getMainLooper())
 
     data class WifiNetworkWrapper(
         val ssid: String,
@@ -58,13 +65,13 @@ class WifiManager(private val activity: AppCompatActivity) {
         private val onClick: (WifiNetworkWrapper) -> Unit
     ) : RecyclerView.Adapter<WifiAdapter.ViewHolder>() {
         class ViewHolder(val view: View) : RecyclerView.ViewHolder(view) {
-            val nameText: TextView = view.findViewById(android.R.id.text1)
-            val statusText: TextView = view.findViewById(android.R.id.text2)
+            val nameText: TextView = view.findViewById(R.id.deviceTextView)
+            val statusText: TextView = view.findViewById(R.id.deviceInfoTextView)
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
             val view = LayoutInflater.from(parent.context)
-                .inflate(android.R.layout.simple_list_item_2, parent, false)
+                .inflate(R.layout.device_list_item, parent, false)
             return ViewHolder(view)
         }
 
@@ -133,7 +140,7 @@ class WifiManager(private val activity: AppCompatActivity) {
     private fun showWifiDialog() {
         val dialogView = LayoutInflater.from(activity).inflate(R.layout.dialog_device_list, null)
         val recyclerView = dialogView.findViewById<RecyclerView>(R.id.device_list)
-        val progressIndicator = dialogView.findViewById<CircularProgressIndicator>(R.id.progress_indicator)
+        val progressIndicator = dialogView.findViewById<ProgressBar>(R.id.progress_indicator)
         val emptyMessage = dialogView.findViewById<TextView>(R.id.empty_message)
 
         recyclerView.layoutManager = LinearLayoutManager(activity)
@@ -182,20 +189,94 @@ class WifiManager(private val activity: AppCompatActivity) {
     private fun handleNetworkClick(network: WifiNetworkWrapper) {
         val currentSsid = getCurrentSsid()
         if (network.ssid == currentSsid) {
-            disconnectFromNetwork()
+            MaterialAlertDialogBuilder(activity)
+                .setTitle(network.ssid)
+                .setItems(arrayOf("Disconnect", "Show Info")) { _, which ->
+                    when (which) {
+                        0 -> disconnectFromNetwork(network.ssid)
+                        1 -> showNetworkInfo(network)
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
         } else {
             connectToWifi(network)
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.S)
     @SuppressLint("MissingPermission")
-    private fun disconnectFromNetwork() {
-        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CHANGE_WIFI_STATE) == PackageManager.PERMISSION_GRANTED) {
-            wifiManager.disconnect()
-            showSnackbar("Disconnected from Wi-Fi")
-        } else {
+    private fun disconnectFromNetwork(ssid: String) {
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CHANGE_WIFI_STATE) != PackageManager.PERMISSION_GRANTED) {
             showSnackbar("Permission denied to disconnect Wi-Fi")
+            return
         }
+
+        try {
+            val configuredNetworks = wifiManager.configuredNetworks
+            val networkId = configuredNetworks?.find { it.SSID == "\"$ssid\"" }?.networkId
+            if (networkId != null) {
+                Log.d(TAG, "Disconnecting from network: $ssid, networkId: $networkId")
+                wifiManager.disconnect()
+                wifiManager.disableNetwork(networkId)
+                showSnackbar("Disconnected from $ssid")
+                // Refresh the dialog to update the "Connected" status
+                activity.runOnUiThread {
+                    wifiDialog?.findViewById<RecyclerView>(R.id.device_list)?.adapter = WifiAdapter(wifiNetworks, getCurrentSsid()) { network ->
+                        wifiDialog?.dismiss()
+                        handleNetworkClick(network)
+                    }
+                }
+            } else {
+                Log.w(TAG, "Network configuration not found for SSID: $ssid")
+                showSnackbar("Failed to disconnect: Network not found")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error disconnecting from network: ${e.message}")
+            showSnackbar("Failed to disconnect from $ssid")
+        }
+    }
+
+    private fun showNetworkInfo(network: WifiNetworkWrapper) {
+        val info = buildString {
+            append("SSID: ${network.ssid}\n")
+            append("BSSID: ${network.bssid}\n")
+            append("Signal Strength: ${network.level}dBm\n")
+            append("Security: ${if (network.capabilities.contains("PSK")) "WPA/WPA2" else if (network.capabilities.contains("WEP")) "WEP" else "Open"}")
+        }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Network Info")
+            .setMessage(info)
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun showConnectionProgress() {
+        val dialogView = LayoutInflater.from(activity).inflate(R.layout.dialog_device_list, null)
+        val recyclerView = dialogView.findViewById<RecyclerView>(R.id.device_list)
+        val progressIndicator = dialogView.findViewById<ProgressBar>(R.id.progress_indicator)
+        val emptyMessage = dialogView.findViewById<TextView>(R.id.empty_message)
+
+        recyclerView.isVisible = false
+        emptyMessage.isVisible = false
+        progressIndicator.isVisible = true
+
+        connectionDialog = MaterialAlertDialogBuilder(activity)
+            .setTitle("Connecting...")
+            .setView(dialogView)
+            .setCancelable(false)
+            .create()
+
+        connectionDialog?.show()
+
+        // Set a timeout to dismiss the dialog if no connection state change is received
+        handler.postDelayed({
+            if (connectionDialog?.isShowing == true) {
+                connectionDialog?.dismiss()
+                //showSnackbar("Connection attempt timed out")
+            }
+        }, CONNECTION_TIMEOUT_MS)
     }
 
     @RequiresApi(Build.VERSION_CODES.S)
@@ -215,6 +296,8 @@ class WifiManager(private val activity: AppCompatActivity) {
             return
         }
 
+        showConnectionProgress()
+
         val wifiConfig = WifiConfiguration().apply {
             SSID = "\"${network.ssid}\""
             allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
@@ -222,11 +305,14 @@ class WifiManager(private val activity: AppCompatActivity) {
 
         val networkId = wifiManager.addNetwork(wifiConfig)
         if (networkId != -1) {
+            Log.d(TAG, "Connecting to open network: ${network.ssid}, networkId: $networkId")
             wifiManager.disconnect()
             wifiManager.enableNetwork(networkId, true)
             wifiManager.reconnect()
-            showSnackbar("Connecting to ${network.ssid}")
         } else {
+            Log.w(TAG, "Failed to add network configuration for ${network.ssid}")
+            connectionDialog?.dismiss()
+            handler.removeCallbacksAndMessages(null) // Clear timeout
             showSnackbar("Failed to connect to ${network.ssid}")
         }
     }
@@ -263,6 +349,8 @@ class WifiManager(private val activity: AppCompatActivity) {
             return
         }
 
+        showConnectionProgress()
+
         val wifiConfig = WifiConfiguration().apply {
             SSID = "\"${network.ssid}\""
             if (network.capabilities.contains("PSK")) {
@@ -279,11 +367,14 @@ class WifiManager(private val activity: AppCompatActivity) {
 
         val networkId = wifiManager.addNetwork(wifiConfig)
         if (networkId != -1) {
+            Log.d(TAG, "Connecting to secured network: ${network.ssid}, networkId: $networkId")
             wifiManager.disconnect()
             wifiManager.enableNetwork(networkId, true)
             wifiManager.reconnect()
-            showSnackbar("Connecting to ${network.ssid}")
         } else {
+            Log.w(TAG, "Failed to add network configuration for ${network.ssid}")
+            connectionDialog?.dismiss()
+            handler.removeCallbacksAndMessages(null) // Clear timeout
             showSnackbar("Failed to connect to ${network.ssid}")
         }
     }
@@ -303,7 +394,7 @@ class WifiManager(private val activity: AppCompatActivity) {
                                 }
                             }
                             activity.runOnUiThread {
-                                wifiDialog?.findViewById<CircularProgressIndicator>(R.id.progress_indicator)?.isVisible = false
+                                wifiDialog?.findViewById<ProgressBar>(R.id.progress_indicator)?.isVisible = false
                                 wifiDialog?.findViewById<RecyclerView>(R.id.device_list)?.adapter = WifiAdapter(wifiNetworks, getCurrentSsid()) { network ->
                                     wifiDialog?.dismiss()
                                     handleNetworkClick(network)
@@ -314,12 +405,49 @@ class WifiManager(private val activity: AppCompatActivity) {
                             }
                         }
                     }
+                    WifiManager.NETWORK_STATE_CHANGED_ACTION -> {
+                        val networkInfo = intent.getParcelableExtra<NetworkInfo>(WifiManager.EXTRA_NETWORK_INFO)
+                        val wifiInfo = intent.getParcelableExtra<WifiInfo>(WifiManager.EXTRA_WIFI_INFO)
+                        Log.d(TAG, "Network state changed: ${networkInfo?.state}, SSID: ${wifiInfo?.ssid}")
+                        if (networkInfo?.state == NetworkInfo.State.CONNECTED && wifiInfo != null) {
+                            val ssid = wifiInfo.ssid?.trim('"')
+                            if (ssid != null) {
+                                activity.runOnUiThread {
+                                    handler.removeCallbacksAndMessages(null) // Clear timeout
+                                    connectionDialog?.dismiss()
+                                    showSnackbar("Successfully connected to $ssid")
+                                    // Refresh the dialog to update the "Connected" status
+                                    wifiDialog?.findViewById<RecyclerView>(R.id.device_list)?.adapter = WifiAdapter(wifiNetworks, getCurrentSsid()) { network ->
+                                        wifiDialog?.dismiss()
+                                        handleNetworkClick(network)
+                                    }
+                                }
+                            }
+                        } else if (networkInfo?.state == NetworkInfo.State.DISCONNECTED || networkInfo?.state == NetworkInfo.State.DISCONNECTING) {
+                            activity.runOnUiThread {
+                                handler.removeCallbacksAndMessages(null) // Clear timeout
+                                connectionDialog?.dismiss()
+                                // Refresh the dialog to update the "Connected" status
+                                wifiDialog?.findViewById<RecyclerView>(R.id.device_list)?.adapter = WifiAdapter(wifiNetworks, getCurrentSsid()) { network ->
+                                    wifiDialog?.dismiss()
+                                    handleNetworkClick(network)
+                                }
+                                // Only show failure message if a connection attempt was in progress
+                                if (connectionDialog != null) {
+                                    showSnackbar("Failed to connect to network")
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
         wifiReceiver = newReceiver
-        val filter = IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
+        val filter = IntentFilter().apply {
+            addAction(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
+            addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)
+        }
         activity.registerReceiver(newReceiver, filter)
     }
 
@@ -437,5 +565,7 @@ class WifiManager(private val activity: AppCompatActivity) {
     fun cleanup() {
         unregisterReceiver()
         wifiDialog?.dismiss()
+        connectionDialog?.dismiss()
+        handler.removeCallbacksAndMessages(null) // Clear any pending timeouts
     }
 }

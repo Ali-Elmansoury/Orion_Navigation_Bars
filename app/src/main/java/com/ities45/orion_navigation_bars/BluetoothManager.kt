@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -22,13 +23,14 @@ import androidx.core.view.isVisible
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.google.android.material.progressindicator.CircularProgressIndicator
 import com.google.android.material.snackbar.Snackbar
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.OvershootInterpolator
+import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.annotation.RequiresPermission
 import java.lang.reflect.Method
 
 class BluetoothManager(private val activity: AppCompatActivity) {
@@ -51,6 +53,7 @@ class BluetoothManager(private val activity: AppCompatActivity) {
         val bondState: Int
         fun createBond(): Boolean
         fun removeBond(): Boolean
+        fun getDevice(): BluetoothDevice?
     }
 
     private class RealBluetoothDevice(
@@ -58,12 +61,28 @@ class BluetoothManager(private val activity: AppCompatActivity) {
         private val device: BluetoothDevice
     ) : BluetoothDeviceWrapper {
         override val name: String
-            get() = if (
-                ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-            ) {
-                device.name ?: device.address
-            } else {
-                device.address
+            get() {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    Log.w(TAG, "BLUETOOTH_CONNECT permission denied, returning address: ${device.address}")
+                    return device.address
+                }
+                val deviceName = device.name
+                Log.d(TAG, "Device name: $deviceName, address: ${device.address}, bondState: ${device.bondState}")
+                // Attempt to fetch name if null and not bonded
+                if (deviceName == null && device.bondState != BluetoothDevice.BOND_BONDED) {
+                    try {
+                        device.fetchUuidsWithSdp()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to fetch UUIDs for name: ${e.message}")
+                    }
+                }
+                return deviceName ?: if (device.bondState == BluetoothDevice.BOND_BONDED) {
+                    "Paired Device (${device.address})"
+                } else {
+                    "Unpaired Device (${device.address})"
+                }
             }
 
         override val address: String
@@ -84,8 +103,10 @@ class BluetoothManager(private val activity: AppCompatActivity) {
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
             ) {
+                Log.w(TAG, "Cannot create bond: BLUETOOTH_CONNECT permission denied")
                 false
             } else {
+                Log.d(TAG, "Creating bond for device: ${device.address}")
                 device.createBond()
             }
         }
@@ -95,9 +116,11 @@ class BluetoothManager(private val activity: AppCompatActivity) {
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
             ) {
+                Log.w(TAG, "Cannot remove bond: BLUETOOTH_CONNECT permission denied")
                 false
             } else {
                 try {
+                    Log.d(TAG, "Removing bond for device: ${device.address}")
                     val method: Method = device.javaClass.getMethod("removeBond")
                     method.invoke(device) as Boolean
                 } catch (e: Exception) {
@@ -106,6 +129,10 @@ class BluetoothManager(private val activity: AppCompatActivity) {
                 }
             }
         }
+
+        override fun getDevice(): BluetoothDevice? {
+            return device
+        }
     }
 
     private class DeviceAdapter(
@@ -113,13 +140,13 @@ class BluetoothManager(private val activity: AppCompatActivity) {
         private val onClick: (BluetoothDeviceWrapper) -> Unit
     ) : RecyclerView.Adapter<DeviceAdapter.ViewHolder>() {
         class ViewHolder(val view: View) : RecyclerView.ViewHolder(view) {
-            val nameText: TextView = view.findViewById(android.R.id.text1)
-            val statusText: TextView = view.findViewById(android.R.id.text2)
+            val nameText: TextView = view.findViewById(R.id.deviceTextView)
+            val statusText: TextView = view.findViewById(R.id.deviceInfoTextView)
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
             val view = LayoutInflater.from(parent.context)
-                .inflate(android.R.layout.simple_list_item_2, parent, false)
+                .inflate(R.layout.device_list_item, parent, false)
             return ViewHolder(view)
         }
 
@@ -129,7 +156,7 @@ class BluetoothManager(private val activity: AppCompatActivity) {
             holder.statusText.text = when (device.bondState) {
                 BluetoothDevice.BOND_BONDED -> "Paired"
                 BluetoothDevice.BOND_BONDING -> "Pairing..."
-                else -> device.address
+                else -> "Not Paired (${device.address})"
             }
             holder.view.setOnClickListener { onClick(device) }
         }
@@ -165,15 +192,22 @@ class BluetoothManager(private val activity: AppCompatActivity) {
             return
         }
 
-        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+        ) {
             requestBluetoothPermission(startDiscoveryAfterGrant = true)
             return
         }
 
         discoveredDevices.clear()
-        bluetoothAdapter.bondedDevices?.forEach { device ->
-            val wrapper = RealBluetoothDevice(activity, device)
-            discoveredDevices.add(wrapper)
+        if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+            bluetoothAdapter.bondedDevices?.forEach { device ->
+                val wrapper = RealBluetoothDevice(activity, device)
+                discoveredDevices.add(wrapper)
+                Log.d(TAG, "Added bonded device: ${wrapper.name}, address: ${wrapper.address}")
+            }
+        } else {
+            Log.w(TAG, "Cannot access bonded devices: BLUETOOTH_CONNECT permission denied")
         }
 
         unregisterReceiver()
@@ -193,7 +227,7 @@ class BluetoothManager(private val activity: AppCompatActivity) {
     private fun showBluetoothDialog() {
         val dialogView = LayoutInflater.from(activity).inflate(R.layout.dialog_device_list, null)
         val recyclerView = dialogView.findViewById<RecyclerView>(R.id.device_list)
-        val progressIndicator = dialogView.findViewById<CircularProgressIndicator>(R.id.progress_indicator)
+        val progressIndicator = dialogView.findViewById<ProgressBar>(R.id.progress_indicator)
         val emptyMessage = dialogView.findViewById<TextView>(R.id.empty_message)
 
         recyclerView.layoutManager = LinearLayoutManager(activity)
@@ -233,17 +267,19 @@ class BluetoothManager(private val activity: AppCompatActivity) {
         if (bluetoothReceiver != null) return
 
         val newReceiver = object : BroadcastReceiver() {
+            @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
             override fun onReceive(context: Context, intent: Intent) {
                 when (intent.action) {
                     BluetoothAdapter.ACTION_DISCOVERY_STARTED -> {
                         Log.d(TAG, "Bluetooth discovery started")
-                        activity.runOnUiThread { bluetoothDialog?.findViewById<CircularProgressIndicator>(R.id.progress_indicator)?.isVisible = true }
+                        activity.runOnUiThread { bluetoothDialog?.findViewById<ProgressBar>(R.id.progress_indicator)?.isVisible = true }
                     }
                     BluetoothDevice.ACTION_FOUND -> {
                         val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
                         if (device != null && !discoveredDevices.any { it.address == device.address }) {
                             val wrapper = RealBluetoothDevice(activity, device)
                             discoveredDevices.add(wrapper)
+                            Log.d(TAG, "Discovered device: ${wrapper.name}, address: ${wrapper.address}, bondState: ${wrapper.bondState}")
                             activity.runOnUiThread {
                                 bluetoothDialog?.findViewById<RecyclerView>(R.id.device_list)?.adapter?.notifyDataSetChanged()
                             }
@@ -252,7 +288,7 @@ class BluetoothManager(private val activity: AppCompatActivity) {
                     BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
                         Log.d(TAG, "Bluetooth discovery finished")
                         activity.runOnUiThread {
-                            bluetoothDialog?.findViewById<CircularProgressIndicator>(R.id.progress_indicator)?.isVisible = false
+                            bluetoothDialog?.findViewById<ProgressBar>(R.id.progress_indicator)?.isVisible = false
                             if (discoveredDevices.isEmpty()) {
                                 bluetoothDialog?.findViewById<TextView>(R.id.empty_message)?.isVisible = true
                             }
@@ -262,14 +298,29 @@ class BluetoothManager(private val activity: AppCompatActivity) {
                         val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
                         val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
                         if (device != null) {
+                            Log.d(TAG, "Bond state changed for ${device.address}: $bondState")
                             activity.runOnUiThread {
                                 val index = discoveredDevices.indexOfFirst { it.address == device.address }
                                 if (index != -1) {
-                                    discoveredDevices.removeAt(index)
-                                    if (bondState == BluetoothDevice.BOND_BONDED) {
-                                        discoveredDevices.add(index, RealBluetoothDevice(activity, device))
-                                    }
+                                    discoveredDevices[index] = RealBluetoothDevice(activity, device)
+                                    bluetoothDialog?.findViewById<RecyclerView>(R.id.device_list)?.adapter?.notifyItemChanged(index)
+                                } else if (bondState == BluetoothDevice.BOND_BONDED) {
+                                    val wrapper = RealBluetoothDevice(activity, device)
+                                    discoveredDevices.add(wrapper)
                                     bluetoothDialog?.findViewById<RecyclerView>(R.id.device_list)?.adapter?.notifyDataSetChanged()
+                                }
+                            }
+                        }
+                    }
+                    BluetoothDevice.ACTION_NAME_CHANGED -> {
+                        val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                        if (device != null) {
+                            Log.d(TAG, "Name changed for ${device.address}: ${device.name}")
+                            activity.runOnUiThread {
+                                val index = discoveredDevices.indexOfFirst { it.address == device.address }
+                                if (index != -1) {
+                                    discoveredDevices[index] = RealBluetoothDevice(activity, device)
+                                    bluetoothDialog?.findViewById<RecyclerView>(R.id.device_list)?.adapter?.notifyItemChanged(index)
                                 }
                             }
                         }
@@ -284,6 +335,7 @@ class BluetoothManager(private val activity: AppCompatActivity) {
             addAction(BluetoothDevice.ACTION_FOUND)
             addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
             addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            addAction(BluetoothDevice.ACTION_NAME_CHANGED)
         }
         activity.registerReceiver(newReceiver, filter)
     }
@@ -316,7 +368,9 @@ class BluetoothManager(private val activity: AppCompatActivity) {
     }
 
     private fun cancelDiscovery() {
-        if (ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+        ) {
             bluetoothAdapter?.cancelDiscovery()
         }
     }
@@ -364,11 +418,14 @@ class BluetoothManager(private val activity: AppCompatActivity) {
                 activity.shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_FINE_LOCATION)) {
                 MaterialAlertDialogBuilder(activity)
                     .setTitle("Permission Required")
-                    .setMessage("Bluetooth and Location permissions are needed to scan for and manage devices")
+                    .setMessage("Bluetooth and Location permissions are needed to scan for and manage devices. Please grant the required permissions.")
                     .setPositiveButton("OK") { _, _ ->
                         ActivityCompat.requestPermissions(activity, needed.toTypedArray(), REQUEST_BLUETOOTH_PERMISSION)
                     }
-                    .setNegativeButton("Cancel", null)
+                    .setNegativeButton("Cancel") { _, _ ->
+                        showSnackbar("Bluetooth permissions denied")
+                        pendingStartDiscovery = false
+                    }
                     .show()
             } else {
                 ActivityCompat.requestPermissions(activity, needed.toTypedArray(), REQUEST_BLUETOOTH_PERMISSION)
@@ -382,6 +439,48 @@ class BluetoothManager(private val activity: AppCompatActivity) {
         }
     }
 
+    @SuppressLint("MissingPermission")
+    private fun disconnectDevice(device: BluetoothDeviceWrapper) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ActivityCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestBluetoothPermission(startDiscoveryAfterGrant = false)
+            return
+        }
+
+        val btDevice = (device as? RealBluetoothDevice)?.getDevice()
+        if (btDevice != null) {
+            try {
+                // Attempt to disconnect profiles (A2DP, HEADSET, GATT, etc.)
+                val profiles = listOf(BluetoothProfile.A2DP, BluetoothProfile.HEADSET, BluetoothProfile.GATT)
+                var disconnected = false
+                for (profile in profiles) {
+                    bluetoothAdapter?.getProfileProxy(activity, object : BluetoothProfile.ServiceListener {
+                        override fun onServiceConnected(profileId: Int, proxy: BluetoothProfile?) {
+                            try {
+                                val disconnectMethod = proxy?.javaClass?.getMethod("disconnect", BluetoothDevice::class.java)
+                                disconnectMethod?.invoke(proxy, btDevice)
+                                disconnected = true
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to disconnect profile $profileId: ${e.message}")
+                            } finally {
+                                bluetoothAdapter?.closeProfileProxy(profileId, proxy)
+                            }
+                        }
+
+                        override fun onServiceDisconnected(profileId: Int) {}
+                    }, profile)
+                }
+                showSnackbar(if (disconnected) "Disconnected from ${device.name}" else "No active connection for ${device.name}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error disconnecting device: ${e.message}")
+                showSnackbar("Failed to disconnect ${device.name}")
+            }
+        } else {
+            showSnackbar("Failed to disconnect ${device.name}")
+        }
+    }
+
     private fun handleDeviceClick(device: BluetoothDeviceWrapper) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             device is RealBluetoothDevice &&
@@ -392,11 +491,22 @@ class BluetoothManager(private val activity: AppCompatActivity) {
         }
 
         if (device.bondState == BluetoothDevice.BOND_BONDED) {
-            if (device.removeBond()) {
-                showSnackbar("Unpairing ${device.name}")
-            } else {
-                showSnackbar("Failed to unpair ${device.name}")
-            }
+            MaterialAlertDialogBuilder(activity)
+                .setTitle(device.name)
+                .setItems(arrayOf("Disconnect", "Unpair")) { _, which ->
+                    when (which) {
+                        0 -> disconnectDevice(device)
+                        1 -> {
+                            if (device.removeBond()) {
+                                showSnackbar("Unpairing ${device.name}")
+                            } else {
+                                showSnackbar("Failed to unpair ${device.name}")
+                            }
+                        }
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
         } else if (device.bondState == BluetoothDevice.BOND_NONE) {
             if (device.createBond()) {
                 showSnackbar("Pairing with ${device.name}")
@@ -421,6 +531,11 @@ class BluetoothManager(private val activity: AppCompatActivity) {
                     pendingStartDiscovery = false
                 } else {
                     showSnackbar("Bluetooth permissions granted")
+                    // Refresh the dialog to update device names
+                    if (bluetoothDialog?.isShowing == true) {
+                        discoveredDevices.clear()
+                        startDiscovery()
+                    }
                 }
             } else {
                 pendingStartDiscovery = false

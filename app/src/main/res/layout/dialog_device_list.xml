@@ -6,7 +6,7 @@
     android:layout_height="wrap_content"
     android:padding="16dp">
 
-    <com.google.android.material.progressindicator.CircularProgressIndicator
+    <ProgressBar
         android:id="@+id/progress_indicator"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
@@ -14,8 +14,8 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         android:layout_marginTop="16dp"
-        app:indicatorColor="@color/design_default_color_error"
-        app:trackColor="@color/black" />
+        app:indicatorColor="#6200EE"
+        app:trackColor="#BDBDBD" />
 
     <TextView
         android:id="@+id/empty_message"
